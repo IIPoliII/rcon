@@ -5,15 +5,20 @@ FIND_PACKAGE(PkgConfig)
 
 PKG_CHECK_MODULES(GLIB2 REQUIRED glib-2.0)
 
-SET(INSTALL_BASH_COMPLETION ON  CACHE BOOLEAN "Install bash completion?")
+SET(INSTALL_BASH_COMPLETION ON CACHE BOOLEAN "Install bash completion?")
 
 SET(SOURCES
   "main.c"
   "srcrcon.c"
-  "config.c")
+  "config.c"
+  "bercon.c"
+  "rcon.c"
+  "crc32.c")
 SET(HEADERS
   "srcrcon.h"
   "config.h"
+  "bercon.h"
+  "crc32.h"
   ${CMAKE_CURRENT_BINARY_DIR}/config.h)
 
 INCLUDE_DIRECTORIES("${CMAKE_SOURCE_DIR}/include"

@@ -23,6 +23,11 @@ static char *port = NULL;
 static char *config = NULL;
 static char *server = NULL;
 
+static uint32_t socktype = 0;
+static struct addrinfo *sinfo = NULL;
+
+static rcon_proto_t *proto = NULL;
+
 static GByteArray *response = NULL;
 
 static void cleanup(void)
@@ -53,6 +58,7 @@ static void usage(void)
     puts(" -P, --password   RCON Password");
     puts(" -p, --port       Port or service");
     puts(" -s, --server     Use this server from config file");
+    puts(" -t, --type       Type of the server: source, battleye");
 }
 
 static int parse_args(int ac, char **av)
@@ -64,6 +70,7 @@ static int parse_args(int ac, char **av)
         { "password", required_argument, 0, 'P' },
         { "port", required_argument, 0, 'p' },
         { "server", required_argument, 0, 's' },
+        { "type", required_argument, 0, 't' },
         { NULL, 0, 0, 0 }
     };
 
@@ -80,6 +87,14 @@ static int parse_args(int ac, char **av)
         case 'P': free(password); password = strdup(optarg); break;
         case 's': free(server); server = strdup(optarg); break;
         case 'h': usage(); exit(0); break;
+        case 't':
+        {
+            proto = rcon_proto_by_name(optarg);
+            if (proto == NULL) {
+                fprintf(stderr, "Invalid protocol: %s\n", optarg);
+                exit(1);
+            }
+        } break;
         default: /* intentional */
         case '?': usage(); exit(1); break;
         }
@@ -88,20 +103,24 @@ static int parse_args(int ac, char **av)
     return 0;
 }
 
-static int send_message(int sock, src_rcon_message_t *msg)
+static int send_message(int sock, void *msg)
 {
     uint8_t *data = NULL;
     uint8_t *p = NULL;
     size_t size = 0;
     int ret = 0;
 
-    if (src_rcon_serialize(msg, &data, &size)) {
+    if (proto->serialize(msg, &data, &size)) {
         return -1;
     }
 
     p = data;
     do {
-        ret = write(sock, p, size);
+        if (socktype == SOCK_STREAM) {
+            ret = write(sock, p, size);
+        } else if (socktype == SOCK_DGRAM) {
+            ret = sendto(sock, p, size, 0, sinfo->ai_addr, sinfo->ai_addrlen);
+        }
         if (ret == 0 || ret < 0) {
             free(data);
             fprintf(stderr, "Failed to communicate: %s\n", strerror(errno));
@@ -117,11 +136,11 @@ static int send_message(int sock, src_rcon_message_t *msg)
     return 0;
 }
 
-static int wait_auth(int sock, src_rcon_message_t *auth)
+static int wait_auth(int sock, void *auth)
 {
     uint8_t tmp[512];
     int ret = 0;
-    src_rcon_error_t status;
+    rcon_error_t status;
     size_t off = 0;
 
     do {
@@ -133,8 +152,8 @@ static int wait_auth(int sock, src_rcon_message_t *auth)
 
         g_byte_array_append(response, tmp, ret);
 
-        status = src_rcon_auth_wait(auth, &off, response->data, response->len);
-        if (status != src_rcon_moredata) {
+        status = proto->auth_wait(auth, &off, response->data, response->len);
+        if (status != rcon_error_moredata) {
             g_byte_array_remove_range(response, 0, off);
             return (int)status;
         }
@@ -145,12 +164,12 @@ static int wait_auth(int sock, src_rcon_message_t *auth)
 
 static int send_command(int sock, char const *cmd)
 {
-    src_rcon_message_t *command = NULL, *marker = NULL;
-    src_rcon_message_t **commandanswers = NULL;
-    src_rcon_message_t **p = NULL;
+    void *command = NULL;
+    void **commandanswers = NULL;
+    void **p = NULL;
     uint8_t tmp[512];
     int ret = 0;
-    src_rcon_error_t status;
+    rcon_error_t status;
     size_t off = 0;
     int ec = -1;
 
@@ -165,15 +184,6 @@ static int send_command(int sock, char const *cmd)
         goto cleanup;
     }
 
-    marker = src_rcon_end_marker(command);
-    if (marker == NULL) {
-        goto cleanup;
-    }
-
-    if (send_message(sock, marker)) {
-        goto cleanup;
-    }
-
     do {
         ret = read(sock, tmp, sizeof(tmp));
         if (ret < 0) {
@@ -182,16 +192,16 @@ static int send_command(int sock, char const *cmd)
         }
 
         g_byte_array_append(response, tmp, ret);
-        status = src_rcon_command_wait(command, &commandanswers, &off,
-                                       response->data, response->len);
-        if (status != src_rcon_moredata) {
+        status = proto->command_wait(command, &commandanswers, &off,
+                                     response->data, response->len);
+        if (status != rcon_error_moredata) {
             g_byte_array_remove_range(response, 0, off);
             break;
         }
     } while (true);
 
     for (p = commandanswers; *p != NULL; p++) {
-        fprintf(stdout, "%s", (char const*)(*p)->body);
+        fprintf(stdout, "%s", proto->get_body(*p));
         fflush(stdout);
     }
 
@@ -199,9 +209,8 @@ static int send_command(int sock, char const *cmd)
 
 cleanup:
 
-    src_rcon_free(command);
-    src_rcon_free(marker);
-    src_rcon_freev(commandanswers);
+    proto->free(command);
+    proto->freev(commandanswers);
 
     return ec;
 }
@@ -304,7 +313,7 @@ int do_config(void)
     free(port);
     free(password);
 
-    if (config_host_data(server, &host, &port, &password)) {
+    if (config_host_data(server, &host, &port, &password, &proto)) {
         fprintf(stderr, "Server %s not found in configuration\n", server);
         return 2;
     }
@@ -314,9 +323,8 @@ int do_config(void)
 
 int main(int ac, char **av)
 {
-    struct addrinfo *info = NULL, *ai = NULL;
-    src_rcon_message_t *auth = NULL;
-    src_rcon_message_t **authanswers = NULL;
+    struct addrinfo *info = NULL, *ai = NULL, hint = {0};
+    void *auth = NULL;
     int sock = 0;
     int ret = 0;
     int ec = 3;
@@ -342,7 +350,18 @@ int main(int ac, char **av)
         return 1;
     }
 
-    if ((ret = getaddrinfo(host, port, NULL, &info))) {
+    if (proto == NULL) {
+        proto = rcon_proto_default();
+    }
+
+    socktype = proto->protocol();
+
+    memset(&hint, 0, sizeof(hint));
+    hint.ai_socktype = socktype;
+    hint.ai_family = AF_UNSPEC;
+    hint.ai_flags = AI_PASSIVE;
+
+    if ((ret = getaddrinfo(host, port, &hint, &info))) {
         fprintf(stderr, "Failed to resolve host: %s: %s\n",
                 host, gai_strerror(ret)
             );
@@ -355,7 +374,12 @@ int main(int ac, char **av)
             continue;
         }
 
-        if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
+        if (socktype == SOCK_STREAM) {
+            if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
+                break;
+            }
+        } else if (socktype == SOCK_DGRAM) {
+            sinfo = ai;
             break;
         }
 
@@ -370,12 +394,12 @@ int main(int ac, char **av)
 
     response = g_byte_array_new();
 
-    /* Do we have a password?
+    /* Do we have a password? And support for password auth?
      */
-    if (password != NULL && strlen(password) > 0) {
+    if (password != NULL && strlen(password) > 0 && proto->auth != NULL) {
         /* Send auth request first
          */
-        auth = src_rcon_auth(password);
+        auth = proto->auth(password);
 
         if (send_message(sock, auth)) {
             goto cleanup;
@@ -402,8 +426,7 @@ int main(int ac, char **av)
 
 cleanup:
 
-    src_rcon_free(auth);
-    src_rcon_freev(authanswers);
+    proto->free(auth);
 
     if (sock > -1) {
         close(sock);

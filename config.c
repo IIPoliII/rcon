@@ -13,6 +13,7 @@
  */
 #define CONFIG_KEY_SERVICE  "port"
 #define CONFIG_KEY_PASSWORD "password"
+#define CONFIG_KEY_PROTOCOL "protocol"
 
 static GKeyFile *config = NULL;
 
@@ -48,27 +49,40 @@ void config_free(void)
 }
 
 int config_host_data(char const *name, char **hostname,
-                     char **service, char **passwd)
+                     char **service, char **passwd,
+                     rcon_proto_t **proto)
 {
-    gchar *h = NULL, *s = NULL, *p = NULL;
+    gchar *h = NULL, *s = NULL, *p = NULL, *pr = NULL;
+    rcon_proto_t *prt = NULL;
+    int ret = -3;
+
     return_if_true(config == NULL, -1);
 
     if (!g_key_file_has_group(config, name)) {
-        return -2;
+        goto cleanup;
     }
 
     h = g_key_file_get_string(config, name, CONFIG_KEY_HOSTNAME, NULL);
     if (h == NULL) {
-        return -3;
+        goto cleanup;
     }
 
     s = g_key_file_get_string(config, name, CONFIG_KEY_SERVICE, NULL);
     if (s == NULL) {
         g_free(h);
-        return -3;
+        goto cleanup;
     }
 
     p = g_key_file_get_string(config, name, CONFIG_KEY_PASSWORD, NULL);
+    pr = g_key_file_get_string(config, name, CONFIG_KEY_PROTOCOL, NULL);
+
+    if (pr && proto) {
+        prt = rcon_proto_by_name(pr);
+        if (!prt) {
+            goto cleanup;
+        }
+        *proto = prt;
+    }
 
     if (hostname) {
         *hostname = strdup(h);
@@ -82,9 +96,13 @@ int config_host_data(char const *name, char **hostname,
         *passwd = strdup(p);
     }
 
+    ret = 0;
+
+cleanup:
+
     g_free(h);
     g_free(s);
     g_free(p);
 
-    return 0;
+    return ret;
 }
