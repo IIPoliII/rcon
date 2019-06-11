@@ -7,7 +7,7 @@ It will send commands to the given server, and print the reply to stdout.
 
 # Installation
 
-You require ```check```, ```cmake``` and ```glib-2.0``` to successfully build
+You require ```g++```, ```libgtk2.0-dev```, ```libperl-dev```, ```check```, ```cmake``` and ```glib-2.0``` to successfully build
 rcon:
 
 ```shell
